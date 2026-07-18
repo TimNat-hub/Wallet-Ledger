@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Ledger">
 <meta name="mobile-web-app-capable" content="yes">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -131,6 +132,15 @@
   .add-inline input{flex:1;}
 
   ::placeholder{color:#B8B3A5;}
+
+  .cloud-bar{display:flex; justify-content:space-between; align-items:center; padding:8px 0; font-size:12px; color:var(--ink-soft); border-bottom:1px solid var(--line); margin-bottom:2px;}
+  .cloud-bar .cloud-status{display:flex; align-items:center; gap:6px;}
+  .cloud-dot{width:7px; height:7px; border-radius:50%; background:#C9C4B4; display:inline-block;}
+  .cloud-dot.on{background:var(--accent);}
+  .cloud-dot.busy{background:var(--gold);}
+  .cloud-bar .cloud-actions{display:flex; gap:8px;}
+  .cloud-actions button{background:none; border:none; color:var(--ink-soft); font-size:12px; text-decoration:underline; cursor:pointer; padding:0; font-family:'Inter';}
+  .cloud-actions button:hover{color:var(--ink);}
 </style>
 </head>
 <body>
@@ -145,6 +155,21 @@ const KEYS = {
   goals: 'goals',
   settings: 'settings'
 };
+
+// ---------- GOOGLE DRIVE SYNC ----------
+const GOOGLE_CLIENT_ID = '1039658058877-d5clmh0jd34v7h287mukejcr1644fn12.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+const DRIVE_FILENAME = 'ledger-data.json';
+
+let cloud = {
+  tokenClient: null,
+  accessToken: null,
+  fileId: null,
+  status: 'signed-out', // signed-out | ready | syncing | error
+  lastSynced: null,
+  error: null
+};
+let cloudPushTimer = null;
 
 const DEFAULT_CATEGORIES = {
   income: ['Salary','Bonus','Business Income','Investment Returns','Other Income'],
@@ -188,6 +213,137 @@ async function loadAll(){
 async function save(key, value){
   try{ localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); }
   catch(e){ console.error('storage save failed', key, e); }
+  scheduleCloudPush();
+}
+
+// ---- Google Sign-In ----
+function initGoogleAuth(){
+  if(!window.google || !google.accounts || cloud.tokenClient) return;
+  cloud.tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: async (resp) => {
+      if(resp.error){ cloud.status = 'error'; cloud.error = resp.error; render(); return; }
+      cloud.accessToken = resp.access_token;
+      cloud.status = 'syncing';
+      render();
+      await handleSignedIn();
+    }
+  });
+}
+function signIn(){
+  if(!cloud.tokenClient){ initGoogleAuth(); }
+  if(cloud.tokenClient) cloud.tokenClient.requestAccessToken({ prompt: 'consent' });
+}
+function signOut(){
+  if(cloud.accessToken) google.accounts.oauth2.revoke(cloud.accessToken, ()=>{});
+  cloud = { tokenClient: cloud.tokenClient, accessToken: null, fileId: null, status: 'signed-out', lastSynced: null, error: null };
+  render();
+}
+
+async function driveFetch(url, opts={}){
+  return fetch(url, { ...opts, headers: { ...(opts.headers||{}), 'Authorization': `Bearer ${cloud.accessToken}` } });
+}
+
+async function findDriveFile(){
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name,modifiedTime)&q=name='${DRIVE_FILENAME}'`);
+  if(!res.ok) throw new Error('list failed: ' + res.status);
+  const data = await res.json();
+  return (data.files && data.files[0]) || null;
+}
+
+function currentSnapshot(){
+  return {
+    transactions: state.transactions,
+    categories: state.categories,
+    accounts: state.accounts,
+    funds: state.funds,
+    goals: state.goals,
+    settings: state.settings,
+    updatedAt: new Date().toISOString()
+  };
+}
+function applySnapshot(snap){
+  state.transactions = snap.transactions || [];
+  state.categories = snap.categories || DEFAULT_CATEGORIES;
+  state.accounts = snap.accounts || { cash: [], investments: [], liabilities: [] };
+  state.funds = snap.funds || [];
+  state.goals = snap.goals || [];
+  state.settings = snap.settings || { currency: 'RM' };
+  Object.entries(KEYS).forEach(([_,k]) => localStorage.setItem(STORAGE_PREFIX + k, JSON.stringify(state[k])));
+}
+
+async function handleSignedIn(){
+  try{
+    const existing = await findDriveFile();
+    if(existing){
+      cloud.fileId = existing.id;
+      const hasLocalData = state.transactions.length || state.accounts.cash.length || state.accounts.investments.length || state.accounts.liabilities.length || state.funds.length || state.goals.length;
+      let useCloud = true;
+      if(hasLocalData){
+        useCloud = confirm('Found existing data in Google Drive. Load it and replace what\'s on this device? (Cancel keeps this device\'s data and overwrites the Drive copy instead.)');
+      }
+      if(useCloud){
+        const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${existing.id}?alt=media`);
+        const snap = await res.json();
+        applySnapshot(snap);
+      }else{
+        await pushToDrive();
+      }
+    }else{
+      await pushToDrive();
+    }
+    cloud.status = 'ready';
+    cloud.lastSynced = new Date();
+  }catch(e){
+    console.error(e);
+    cloud.status = 'error';
+    cloud.error = e.message;
+  }
+  render();
+}
+
+async function pushToDrive(){
+  if(!cloud.accessToken) return;
+  cloud.status = 'syncing';
+  const snapshot = JSON.stringify(currentSnapshot());
+  try{
+    if(cloud.fileId){
+      const res = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${cloud.fileId}?uploadType=media`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: snapshot
+      });
+      if(!res.ok) throw new Error('update failed: ' + res.status);
+    }else{
+      const boundary = 'ledgerbound';
+      const metadata = { name: DRIVE_FILENAME, parents: ['appDataFolder'] };
+      const body =
+        `--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+        `--${boundary}\r\nContent-Type: application/json\r\n\r\n${snapshot}\r\n--${boundary}--`;
+      const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+        body
+      });
+      if(!res.ok) throw new Error('create failed: ' + res.status);
+      const data = await res.json();
+      cloud.fileId = data.id;
+    }
+    cloud.status = 'ready';
+    cloud.lastSynced = new Date();
+  }catch(e){
+    console.error(e);
+    cloud.status = 'error';
+    cloud.error = e.message;
+  }
+  render();
+}
+
+function scheduleCloudPush(){
+  if(!cloud.accessToken) return;
+  clearTimeout(cloudPushTimer);
+  cloudPushTimer = setTimeout(()=>{ pushToDrive(); }, 1500);
 }
 
 // ---------- HELPERS ----------
@@ -240,6 +396,16 @@ function render(){
   const nw = computeNetWorth();
 
   root.innerHTML = `
+    <div class="cloud-bar">
+      <div class="cloud-status">
+        <span class="cloud-dot ${cloud.status==='ready'?'on':(cloud.status==='syncing'?'busy':'')}"></span>
+        <span>${cloudStatusText()}</span>
+      </div>
+      <div class="cloud-actions">
+        ${cloud.status==='signed-out' ? `<button id="cloudSignIn">Sign in with Google</button>` : ''}
+        ${cloud.status!=='signed-out' ? `<button id="cloudSyncNow">Sync now</button><button id="cloudSignOut">Sign out</button>` : ''}
+      </div>
+    </div>
     <div class="header">
       <div class="brand">
         <h1>Ledger</h1>
@@ -259,6 +425,13 @@ function render(){
     </div>
     <div id="tabContent"></div>
   `;
+  const signInBtn = document.getElementById('cloudSignIn');
+  if(signInBtn) signInBtn.addEventListener('click', signIn);
+  const syncNowBtn = document.getElementById('cloudSyncNow');
+  if(syncNowBtn) syncNowBtn.addEventListener('click', pushToDrive);
+  const signOutBtn = document.getElementById('cloudSignOut');
+  if(signOutBtn) signOutBtn.addEventListener('click', signOut);
+
   document.getElementById('currInput').addEventListener('change', e=>{
     state.settings.currency = e.target.value || 'RM';
     save(KEYS.settings, state.settings);
@@ -276,6 +449,13 @@ function render(){
 }
 function navBtn(id,label){
   return `<button data-nav="${id}" class="${state.tab===id?'active':''}">${label}</button>`;
+}
+function cloudStatusText(){
+  if(cloud.status==='signed-out') return 'Not synced to Google Drive';
+  if(cloud.status==='syncing') return 'Syncing…';
+  if(cloud.status==='error') return `Sync error — ${cloud.error||'try again'}`;
+  if(cloud.lastSynced) return `Synced ${cloud.lastSynced.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
+  return 'Synced';
 }
 
 // ---------- DASHBOARD ----------
@@ -692,6 +872,7 @@ function renderParsePreview(){
 }
 
 loadAll();
+window.addEventListener('load', () => setTimeout(initGoogleAuth, 300));
 </script>
 </body>
 </html>
