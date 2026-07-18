@@ -27,20 +27,33 @@
     --neg:#B3492D;
     --neg-soft:#F7E9E4;
     --gold:#B8933E;
+    --frame-bg:#DCD7C8;
   }
   *{box-sizing:border-box;}
   body{
     margin:0;
-    background:var(--bg);
+    background:var(--frame-bg);
     color:var(--ink);
     font-family:'Inter',sans-serif;
     font-size:14px;
     -webkit-font-smoothing:antialiased;
+    min-height:100vh;
   }
   .num{font-family:'IBM Plex Mono',monospace; font-variant-numeric:tabular-nums;}
   h1,h2,h3{font-family:'Source Serif 4',serif; margin:0; font-weight:600;}
 
-  .app{max-width:1080px; margin:0 auto; padding:28px 20px 60px;}
+  .app{
+    max-width:440px;
+    margin:0 auto;
+    padding:28px 20px 60px;
+    background:var(--bg);
+    min-height:100vh;
+    box-shadow:0 0 0 1px rgba(0,0,0,0.04), 0 12px 48px rgba(28,35,33,0.18);
+    position:relative;
+  }
+  @media (min-width:441px){
+    .app{ border-radius:18px; margin-top:20px; margin-bottom:20px; min-height:calc(100vh - 40px); }
+  }
 
   /* HEADER */
   .header{display:flex; justify-content:space-between; align-items:flex-end; border-bottom:2px solid var(--ink); padding-bottom:16px; margin-bottom:6px;}
@@ -53,13 +66,20 @@
   .currency-input{width:36px; border:none; background:transparent; font-family:inherit; font-size:10px; color:var(--ink-soft); text-align:right; border-bottom:1px dotted var(--line);}
 
   /* NAV */
-  .nav{display:flex; gap:2px; margin:18px 0 24px; border-bottom:1px solid var(--line);}
+  .nav-wrap{position:relative; margin:18px 0 24px;}
+  .nav{display:flex; gap:4px; border-bottom:1px solid var(--line); overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
+  .nav::-webkit-scrollbar{display:none;}
   .nav button{
-    background:none; border:none; padding:10px 16px; font-family:'Inter'; font-size:13px; font-weight:500;
+    background:none; border:none; padding:9px 12px; font-family:'Inter'; font-size:12.5px; font-weight:500;
     color:var(--ink-soft); cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px;
+    white-space:nowrap; flex:0 0 auto;
   }
   .nav button.active{color:var(--ink); border-bottom:2px solid var(--accent);}
   .nav button:hover{color:var(--ink);}
+  .nav-wrap::after{
+    content:''; position:absolute; right:0; top:0; bottom:1px; width:28px; pointer-events:none;
+    background:linear-gradient(to right, transparent, var(--bg));
+  }
 
   /* CARDS */
   .grid{display:grid; gap:14px;}
@@ -429,12 +449,14 @@ function render(){
         <div class="amount num ${nw.total>=0?'':'v neg'}">${fmt(nw.total)}</div>
       </div>
     </div>
-    <div class="nav">
-      ${navBtn('dashboard','Dashboard')}
-      ${navBtn('add','Add Transaction')}
-      ${navBtn('transactions','Transactions')}
-      ${navBtn('networth','Net Worth')}
-      ${navBtn('goals','Goals & Funds')}
+    <div class="nav-wrap">
+      <div class="nav">
+        ${navBtn('dashboard','Dashboard')}
+        ${navBtn('add','Add Transaction')}
+        ${navBtn('transactions','Transactions')}
+        ${navBtn('networth','Net Worth')}
+        ${navBtn('goals','Goals & Funds')}
+      </div>
     </div>
     <div id="tabContent"></div>
   `;
@@ -722,7 +744,11 @@ function renderGoals(){
 // ---------- EVENTS ----------
 function attachTabHandlers(){
   document.querySelectorAll('[data-nav]').forEach(b=>{
-    b.addEventListener('click', ()=>{ state.tab = b.dataset.nav; parsedDraft=null; render(); });
+    b.addEventListener('click', ()=>{
+      state.tab = b.dataset.nav; parsedDraft=null; render();
+      const active = document.querySelector('.nav button.active');
+      if(active) active.scrollIntoView({ behavior:'smooth', inline:'center', block:'nearest' });
+    });
   });
 
   document.querySelectorAll('[data-toggle]').forEach(el=>{
